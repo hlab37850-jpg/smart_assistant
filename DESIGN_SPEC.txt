@@ -1,0 +1,2 @@
+Reference: user-provided 1536x1024 image.
+RTL Arabic business app. Dark navy #071A35, cards #102A4D, blue #2563EB, gold #F59E0B, green #10B981, red #EF4444, muted #9FB2CC. Mobile dashboard with KPI cards, balances, dues, customer/product lists and bottom navigation. No decorative icon grids for customers/products.
