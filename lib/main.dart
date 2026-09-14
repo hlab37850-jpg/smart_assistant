@@ -1729,10 +1729,10 @@ class ImportPage extends StatefulWidget {
   const ImportPage({super.key});
 
   @override
-  State<ImportPage> createState() => _IP();
+  State<ImportPage> createState() => ImportPageState();
 }
 
-class _IP extends State<ImportPage> {
+class ImportPageState extends State<ImportPage> {
   String msg =
       'اختر ملف CSV أو XLSX أو PDF للمعاينة والتحقق قبل الحفظ في قاعدة البيانات.';
   bool busy = false;
@@ -1898,17 +1898,25 @@ class _IP extends State<ImportPage> {
   List<Map<String, dynamic>> extractPdfRows(List<int> bytes, String type) {
     final List<Map<String, dynamic>> list = [];
     try {
-      final rawStr = latin1.decode(bytes);
-      // Clean and extract text blocks/lines from PDF
-      final lines = rawStr
-          .split(RegExp(r'[\r\n]+'))
-          .map((l) => l.trim())
-          .where((l) =>
-              l.contains(',') ||
-              l.contains(';') ||
-              l.contains('\t') ||
-              l.split(RegExp(r'\s+')).length >= 2)
+      final rawStr = String.fromCharCodes(bytes);
+      final textMatches = RegExp(r'\(([^)]+)\)')
+          .allMatches(rawStr)
+          .map((m) => (m.group(1) ?? '').trim())
+          .where((s) =>
+              s.isNotEmpty && s.contains(',') && !s.contains('github.com'))
           .toList();
+
+      final lines = textMatches.isNotEmpty
+          ? textMatches
+          : rawStr
+              .split(RegExp(r'[\r\n]+'))
+              .map((l) => l.trim())
+              .where((l) =>
+                  l.contains(',') ||
+                  l.contains(';') ||
+                  l.contains('\t') ||
+                  l.split(RegExp(r'\s+')).length >= 2)
+              .toList();
 
       for (final line in lines) {
         final parts = line

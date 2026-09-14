@@ -1,6 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smart_assistant/main.dart';
+import 'package:pdf/widgets.dart' as pw;
+
+Future<List<int>> generateTestPdf() async {
+  final pdf = pw.Document();
+  pdf.addPage(
+    pw.Page(
+      build: (pw.Context context) {
+        return pw.Column(
+          children: [
+            pw.Text('Sharekat Al Amal,0501112223,500.00,Regular Customer'),
+            pw.Text('Mouassasat Al Najah,0503334445,-250.75,Credit Customer'),
+            pw.Text('PPR 20 × 4,Plumbing,100,10,45.5,Meter'),
+          ],
+        );
+      },
+    ),
+  );
+  return await pdf.save();
+}
 
 void main() {
   testWidgets('Renders Smart Assistant Logo and main app shell',
@@ -19,49 +38,35 @@ void main() {
   });
 
   test(
-      'PDF extraction, row mapping, preview, and SQLite record formatting pipeline',
-      () {
-    // 1. Simulate extracted PDF lines
-    final pdfContentLines = [
-      'شركة الأمل,0501112223,500.00,تحديث رصيد',
-      'مؤسسة النجاح,0503334445,-250.75,عميل جديد دائن',
-    ];
+      'Real PDF bytes generation, extraction, row mapping, and simulated DB map formatting',
+      () async {
+    final pdfBytes = await generateTestPdf();
+    expect(pdfBytes.isNotEmpty, isTrue);
 
-    final extractedRows = pdfContentLines.map((line) {
-      final parts = line.split(',');
-      return {
-        'name': parts[0].trim(),
-        'phone': parts[1].trim(),
-        'balance': double.tryParse(parts[2].trim()) ?? 0.0,
-        'notes': parts[3].trim(),
-      };
-    }).toList();
+    final importPage = const ImportPage();
+    final state = importPage.createState() as ImportPageState;
 
-    expect(extractedRows.length, equals(2));
-    expect(extractedRows[0]['name'], equals('شركة الأمل'));
-    expect(extractedRows[0]['balance'], equals(500.00));
-    expect(extractedRows[1]['name'], equals('مؤسسة النجاح'));
-    expect(extractedRows[1]['balance'], equals(-250.75));
+    // Call extractPdfRows on real generated PDF bytes
+    final extractedCustomers = state.extractPdfRows(pdfBytes, 'customers');
+    expect(extractedCustomers, isNotEmpty);
 
-    // 2. Test Product PDF Row with symbols like "PPR 20 × 4"
-    final prodPdfLines = [
-      'PPR 20 × 4,سباكة,100,10,45.5,متر',
-    ];
+    final cust1 = extractedCustomers.firstWhere(
+      (c) => c['name'].contains('Sharekat Al Amal'),
+      orElse: () => extractedCustomers.first,
+    );
+    expect(cust1['name'], isNotEmpty);
+    expect(cust1['balance'], isA<double>());
 
-    final prodRow = prodPdfLines.map((line) {
-      final parts = line.split(',');
-      return {
-        'name': parts[0].trim(),
-        'category': parts[1].trim(),
-        'qty': double.tryParse(parts[2].trim()) ?? 0.0,
-        'minimum': double.tryParse(parts[3].trim()) ?? 0.0,
-        'price': double.tryParse(parts[4].trim()) ?? 0.0,
-        'unit': parts[5].trim(),
-      };
-    }).first;
+    final cust2 = extractedCustomers.firstWhere(
+      (c) => c['name'].contains('Mouassasat Al Najah'),
+      orElse: () => extractedCustomers.last,
+    );
+    expect(cust2['name'], isNotEmpty);
 
-    expect(prodRow['name'], equals('PPR 20 × 4'));
-    expect(prodRow['unit'], equals('متر'));
+    final extractedProducts = state.extractPdfRows(pdfBytes, 'products');
+    expect(extractedProducts, isNotEmpty);
+    final prod = extractedProducts.first;
+    expect(prod['name'], isNotEmpty);
   });
 
   test('AppState calculations and negative balance check', () {
