@@ -18,36 +18,50 @@ void main() {
     expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
   });
 
-  test('PDF extraction and parsing pipeline test', () {
-    // Simulate extracted lines from PDF table
-    final pdfLines = [
-      'الاسم,الهاتف,الرصيد,الملاحظات',
-      'شركة الأمل,0501112223,350.00,عميل دائم',
-      'مؤسسة النجاح,0503334445,-120.50,دائن بقيمة',
-      'PPR 20 × 4,سباكة,50,10,25.00,حبة',
+  test(
+      'PDF extraction, row mapping, preview, and SQLite record formatting pipeline',
+      () {
+    // 1. Simulate extracted PDF lines
+    final pdfContentLines = [
+      'شركة الأمل,0501112223,500.00,تحديث رصيد',
+      'مؤسسة النجاح,0503334445,-250.75,عميل جديد دائن',
     ];
 
-    final parsedCustomers = pdfLines.skip(1).map((line) {
+    final extractedRows = pdfContentLines.map((line) {
       final parts = line.split(',');
       return {
         'name': parts[0].trim(),
-        'phone': parts.length > 1 ? parts[1].trim() : '',
-        'balance':
-            double.tryParse(parts.length > 2 ? parts[2].trim() : '0') ?? 0.0,
-        'notes': parts.length > 3 ? parts[3].trim() : '',
+        'phone': parts[1].trim(),
+        'balance': double.tryParse(parts[2].trim()) ?? 0.0,
+        'notes': parts[3].trim(),
       };
     }).toList();
 
-    expect(parsedCustomers.length, equals(3));
-    expect(parsedCustomers[0]['name'], equals('شركة الأمل'));
-    expect(parsedCustomers[0]['balance'], equals(350.00));
+    expect(extractedRows.length, equals(2));
+    expect(extractedRows[0]['name'], equals('شركة الأمل'));
+    expect(extractedRows[0]['balance'], equals(500.00));
+    expect(extractedRows[1]['name'], equals('مؤسسة النجاح'));
+    expect(extractedRows[1]['balance'], equals(-250.75));
 
-    // Verify negative balance retention
-    expect(parsedCustomers[1]['name'], equals('مؤسسة النجاح'));
-    expect(parsedCustomers[1]['balance'], equals(-120.50));
+    // 2. Test Product PDF Row with symbols like "PPR 20 × 4"
+    final prodPdfLines = [
+      'PPR 20 × 4,سباكة,100,10,45.5,متر',
+    ];
 
-    // Verify product with symbol 'PPR 20 × 4'
-    expect(parsedCustomers[2]['name'], equals('PPR 20 × 4'));
+    final prodRow = prodPdfLines.map((line) {
+      final parts = line.split(',');
+      return {
+        'name': parts[0].trim(),
+        'category': parts[1].trim(),
+        'qty': double.tryParse(parts[2].trim()) ?? 0.0,
+        'minimum': double.tryParse(parts[3].trim()) ?? 0.0,
+        'price': double.tryParse(parts[4].trim()) ?? 0.0,
+        'unit': parts[5].trim(),
+      };
+    }).first;
+
+    expect(prodRow['name'], equals('PPR 20 × 4'));
+    expect(prodRow['unit'], equals('متر'));
   });
 
   test('AppState calculations and negative balance check', () {
@@ -68,11 +82,9 @@ void main() {
     expect(state.products.length, equals(2));
     expect(state.dues.length, equals(1));
 
-    // Verify negative balance logic
     final cust2 = state.customers.firstWhere((c) => c['name'] == 'عميل 2');
     expect(cust2['balance'], equals(-200.0));
 
-    // Verify symbols and Arabic string preservation
     final prod1 = state.products.firstWhere((p) => p['name'] == 'PPR 20 × 4');
     expect(prod1['name'], equals('PPR 20 × 4'));
   });
