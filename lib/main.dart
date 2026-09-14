@@ -13,6 +13,7 @@ import 'package:excel/excel.dart' as xl hide Border;
 import 'package:http/http.dart' as http;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:syncfusion_flutter_pdf/pdf.dart' as sf;
 
 const bg = Color(0xFF071A35);
 const card = Color(0xFF102A4D);
@@ -153,6 +154,192 @@ class AppState extends ChangeNotifier {
     model = m;
     base = b;
     notifyListeners();
+  }
+}
+
+// Separate architectural layers for PDF processing
+class PdfTextExtractor {
+  static Map<String, dynamic> extractTextFromPdf(List<int> bytes) {
+    try {
+      final sf.PdfDocument document = sf.PdfDocument(inputBytes: bytes);
+      final sf.PdfTextExtractor extractor = sf.PdfTextExtractor(document);
+      final String text = extractor.extractText();
+      final int pageCount = document.pages.count;
+      document.dispose();
+      return {
+        'pageCount': pageCount,
+        'text': text,
+        'charCount': text.length,
+        'success': true,
+      };
+    } catch (e) {
+      return {
+        'pageCount': 0,
+        'text': '',
+        'charCount': 0,
+        'success': false,
+        'error': e.toString(),
+      };
+    }
+  }
+}
+
+class PdfRowParser {
+  static List<Map<String, dynamic>> parseRows(String rawText, String type) {
+    final List<Map<String, dynamic>> list = [];
+    final lines = rawText
+        .split(RegExp(r'[\r\n]+'))
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+
+    for (final line in lines) {
+      final parts = line
+          .split(RegExp(r'[,;\t]'))
+          .map((p) => p.trim())
+          .where((p) => p.isNotEmpty)
+          .toList();
+      if (parts.isEmpty) {
+        continue;
+      }
+
+      final name = parts[0];
+      if (name.isEmpty ||
+          name.toLowerCase().contains('name') ||
+          name.contains('الاسم')) {
+        continue;
+      }
+
+      if (type == 'customers') {
+        list.add({
+          'name': name,
+          'phone': parts.length > 1 ? parts[1] : '',
+          'balance': double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
+          'notes': parts.length > 3 ? parts[3] : '',
+        });
+      } else {
+        list.add({
+          'name': name,
+          'category': parts.length > 1 ? parts[1] : 'عام',
+          'qty': double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
+          'minimum': double.tryParse(parts.length > 3 ? parts[3] : '5') ?? 0.0,
+          'price': double.tryParse(parts.length > 4 ? parts[4] : '0') ?? 0.0,
+          'unit': parts.length > 5 ? parts[5] : 'قطعة',
+        });
+      }
+    }
+    return list;
+  }
+}
+
+class SQLiteImportService {
+  static Future<Map<String, dynamic>> saveRowsToDb({
+    required Database db,
+    required String type,
+    required List<Map<String, dynamic>> rows,
+  }) async {
+    int insertedCount = 0;
+    int updatedCount = 0;
+    int ignoredCount = 0;
+    int errorCount = 0;
+
+    for (final row in rows) {
+      final act = row['action'];
+      if (act == 'ignore') {
+        ignoredCount++;
+        continue;
+      }
+
+      final String name = (row['name'] as String).trim();
+
+      try {
+        if (type == 'customers') {
+          if (act == 'add') {
+            await db.insert('customers', {
+              'name': name,
+              'phone': row['phone'],
+              'balance': row['balance'],
+              'notes': row['notes'],
+              'created': DateTime.now().toIso8601String(),
+            });
+            insertedCount++;
+          } else if (act == 'update') {
+            final affected = await db.update(
+              'customers',
+              {
+                'phone': row['phone'],
+                'balance': row['balance'],
+                'notes': row['notes'],
+              },
+              where: 'TRIM(name) = ?',
+              whereArgs: [name],
+            );
+            if (affected > 0) {
+              updatedCount++;
+            } else {
+              // Fallback insert if update matched 0 rows
+              await db.insert('customers', {
+                'name': name,
+                'phone': row['phone'],
+                'balance': row['balance'],
+                'notes': row['notes'],
+                'created': DateTime.now().toIso8601String(),
+              });
+              insertedCount++;
+            }
+          }
+        } else {
+          if (act == 'add') {
+            await db.insert('products', {
+              'name': name,
+              'category': row['category'],
+              'qty': row['qty'],
+              'minimum': row['minimum'],
+              'price': row['price'],
+              'unit': row['unit'],
+              'created': DateTime.now().toIso8601String(),
+            });
+            insertedCount++;
+          } else if (act == 'update') {
+            final affected = await db.update(
+              'products',
+              {
+                'category': row['category'],
+                'qty': row['qty'],
+                'minimum': row['minimum'],
+                'price': row['price'],
+                'unit': row['unit'],
+              },
+              where: 'TRIM(name) = ?',
+              whereArgs: [name],
+            );
+            if (affected > 0) {
+              updatedCount++;
+            } else {
+              await db.insert('products', {
+                'name': name,
+                'category': row['category'],
+                'qty': row['qty'],
+                'minimum': row['minimum'],
+                'price': row['price'],
+                'unit': row['unit'],
+                'created': DateTime.now().toIso8601String(),
+              });
+              insertedCount++;
+            }
+          }
+        }
+      } catch (e) {
+        errorCount++;
+      }
+    }
+
+    return {
+      'inserted': insertedCount,
+      'updated': updatedCount,
+      'ignored': ignoredCount,
+      'errors': errorCount,
+    };
   }
 }
 
@@ -1817,20 +2004,22 @@ class ImportPageState extends State<ImportPage> {
         }
         extractedRows = parseRawRows(sheetRows, type);
       } else if (fileName.toLowerCase().endsWith('.pdf')) {
-        extractedRows = extractPdfRows(bytes, type);
+        final pdfRes = PdfTextExtractor.extractTextFromPdf(bytes);
+        final rawText = pdfRes['text'] as String? ?? '';
+        extractedRows = PdfRowParser.parseRows(rawText, type);
       }
 
       if (extractedRows.isEmpty) {
         if (mounted) {
           setState(() {
-            msg = 'لم يتم العثور على بيانات صالحة في الملف $fileName.';
+            msg =
+                'لم يتم العثور على بيانات صالحة في الملف $fileName. قد يكون الملف ممسوحاً ضوئياً ويحتاج إلى OCR.';
             busy = false;
           });
         }
         return;
       }
 
-      // Check duplicates with existing DB records
       final db = await DB.d;
       final existingCusts = await db.query('customers');
       final existingProds = await db.query('products');
@@ -1896,67 +2085,9 @@ class ImportPageState extends State<ImportPage> {
   }
 
   List<Map<String, dynamic>> extractPdfRows(List<int> bytes, String type) {
-    final List<Map<String, dynamic>> list = [];
-    try {
-      final rawStr = String.fromCharCodes(bytes);
-      final textMatches = RegExp(r'\(([^)]+)\)')
-          .allMatches(rawStr)
-          .map((m) => (m.group(1) ?? '').trim())
-          .where((s) =>
-              s.isNotEmpty && s.contains(',') && !s.contains('github.com'))
-          .toList();
-
-      final lines = textMatches.isNotEmpty
-          ? textMatches
-          : rawStr
-              .split(RegExp(r'[\r\n]+'))
-              .map((l) => l.trim())
-              .where((l) =>
-                  l.contains(',') ||
-                  l.contains(';') ||
-                  l.contains('\t') ||
-                  l.split(RegExp(r'\s+')).length >= 2)
-              .toList();
-
-      for (final line in lines) {
-        final parts = line
-            .split(RegExp(r'[,;\t]'))
-            .map((p) => p.trim())
-            .where((p) => p.isNotEmpty)
-            .toList();
-        if (parts.isEmpty) {
-          continue;
-        }
-
-        final name = parts[0];
-        if (name.isEmpty ||
-            name.toLowerCase().contains('name') ||
-            name.toLowerCase().contains('الاسم')) {
-          continue;
-        }
-
-        if (type == 'customers') {
-          list.add({
-            'name': name,
-            'phone': parts.length > 1 ? parts[1] : '',
-            'balance':
-                double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
-            'notes': parts.length > 3 ? parts[3] : '',
-          });
-        } else {
-          list.add({
-            'name': name,
-            'category': parts.length > 1 ? parts[1] : 'عام',
-            'qty': double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
-            'minimum':
-                double.tryParse(parts.length > 3 ? parts[3] : '5') ?? 0.0,
-            'price': double.tryParse(parts.length > 4 ? parts[4] : '0') ?? 0.0,
-            'unit': parts.length > 5 ? parts[5] : 'قطعة',
-          });
-        }
-      }
-    } catch (_) {}
-    return list;
+    final res = PdfTextExtractor.extractTextFromPdf(bytes);
+    final text = res['text'] as String? ?? '';
+    return PdfRowParser.parseRows(text, type);
   }
 
   Future<void> showImportPreviewDialog(
@@ -2026,72 +2157,18 @@ class ImportPageState extends State<ImportPage> {
               style: FilledButton.styleFrom(backgroundColor: green),
               onPressed: () async {
                 final d = await DB.d;
-                int added = 0, updated = 0, ignored = 0;
-
-                for (final row in rows) {
-                  final act = row['action'];
-                  if (act == 'ignore') {
-                    ignored++;
-                    continue;
-                  }
-
-                  if (type == 'customers') {
-                    if (act == 'add') {
-                      await d.insert('customers', {
-                        'name': row['name'],
-                        'phone': row['phone'],
-                        'balance': row['balance'],
-                        'notes': row['notes'],
-                        'created': DateTime.now().toIso8601String(),
-                      });
-                      added++;
-                    } else if (act == 'update') {
-                      await d.update(
-                        'customers',
-                        {
-                          'phone': row['phone'],
-                          'balance': row['balance'],
-                          'notes': row['notes'],
-                        },
-                        where: 'name=?',
-                        whereArgs: [row['name']],
-                      );
-                      updated++;
-                    }
-                  } else {
-                    if (act == 'add') {
-                      await d.insert('products', {
-                        'name': row['name'],
-                        'category': row['category'],
-                        'qty': row['qty'],
-                        'minimum': row['minimum'],
-                        'price': row['price'],
-                        'unit': row['unit'],
-                        'created': DateTime.now().toIso8601String(),
-                      });
-                      added++;
-                    } else if (act == 'update') {
-                      await d.update(
-                        'products',
-                        {
-                          'category': row['category'],
-                          'qty': row['qty'],
-                          'minimum': row['minimum'],
-                          'price': row['price'],
-                          'unit': row['unit'],
-                        },
-                        where: 'name=?',
-                        whereArgs: [row['name']],
-                      );
-                      updated++;
-                    }
-                  }
-                }
+                final resStats = await SQLiteImportService.saveRowsToDb(
+                  db: d,
+                  type: type,
+                  rows: rows,
+                );
 
                 await appState.refresh();
                 if (dialogCtx.mounted) Navigator.pop(dialogCtx);
-                setState(() => msg =
-                    'نتيجة الاستيراد إلى قاعدة البيانات: إضافة ($added)، تحديث ($updated)، تجاهل ($ignored).');
+                if (mounted) {
+                  setState(() => msg =
+                      'نتيجة الاستيراد إلى قاعدة البيانات: إضافة (${resStats['inserted']})، تحديث (${resStats['updated']})، تجاهل (${resStats['ignored']})، أخطاء (${resStats['errors']}).');
+                }
               },
               child: const Text('تأكيد وإدخال إلى SQLite'),
             ),

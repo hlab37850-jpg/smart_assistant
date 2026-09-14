@@ -22,6 +22,7 @@ dependencies:
   printing: ^5.14.2
   http: ^1.5.0
   google_fonts: ^6.3.0
+  syncfusion_flutter_pdf: ^33.2.13
 
 dev_dependencies:
   flutter_test:

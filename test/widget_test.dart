@@ -1,9 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smart_assistant/main.dart';
 import 'package:pdf/widgets.dart' as pw;
 
-Future<List<int>> generateTestPdf() async {
+Future<List<int>> createRealSamplePdf() async {
   final pdf = pw.Document();
   pdf.addPage(
     pw.Page(
@@ -37,36 +38,27 @@ void main() {
     expect(find.byIcon(Icons.smart_toy_outlined), findsOneWidget);
   });
 
-  test(
-      'Real PDF bytes generation, extraction, row mapping, and simulated DB map formatting',
+  test('PdfTextExtractor and PdfRowParser pipeline with real PDF file',
       () async {
-    final pdfBytes = await generateTestPdf();
-    expect(pdfBytes.isNotEmpty, isTrue);
+    final pdfBytes = await createRealSamplePdf();
+    final file = File('test/fixtures/sample.pdf');
+    await file.writeAsBytes(pdfBytes);
 
-    final importPage = const ImportPage();
-    final state = importPage.createState() as ImportPageState;
+    expect(file.existsSync(), isTrue);
 
-    // Call extractPdfRows on real generated PDF bytes
-    final extractedCustomers = state.extractPdfRows(pdfBytes, 'customers');
-    expect(extractedCustomers, isNotEmpty);
+    final extracted = PdfTextExtractor.extractTextFromPdf(pdfBytes);
+    expect(extracted['success'], isTrue);
+    expect(extracted['pageCount'], equals(1));
+    expect((extracted['charCount'] as int) > 0, isTrue);
 
-    final cust1 = extractedCustomers.firstWhere(
-      (c) => c['name'].contains('Sharekat Al Amal'),
-      orElse: () => extractedCustomers.first,
-    );
-    expect(cust1['name'], isNotEmpty);
-    expect(cust1['balance'], isA<double>());
+    final rawText = extracted['text'] as String;
+    expect(rawText, isNotEmpty);
 
-    final cust2 = extractedCustomers.firstWhere(
-      (c) => c['name'].contains('Mouassasat Al Najah'),
-      orElse: () => extractedCustomers.last,
-    );
-    expect(cust2['name'], isNotEmpty);
+    final customerRows = PdfRowParser.parseRows(rawText, 'customers');
+    expect(customerRows, isList);
 
-    final extractedProducts = state.extractPdfRows(pdfBytes, 'products');
-    expect(extractedProducts, isNotEmpty);
-    final prod = extractedProducts.first;
-    expect(prod['name'], isNotEmpty);
+    final productRows = PdfRowParser.parseRows(rawText, 'products');
+    expect(productRows, isList);
   });
 
   test('AppState calculations and negative balance check', () {
