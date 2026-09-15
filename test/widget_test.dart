@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smart_assistant/main.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 Future<List<int>> createRealSamplePdf() async {
   final pdf = pw.Document();
@@ -84,5 +85,55 @@ void main() {
 
     final prod1 = state.products.firstWhere((p) => p['name'] == 'PPR 20 × 4');
     expect(prod1['name'], equals('PPR 20 × 4'));
+  });
+
+  test('ImportMapper Arabic normalization and string matching', () {
+    expect(ImportMapper.normalizeName('أحمد'), equals('احمد'));
+    expect(ImportMapper.normalizeName('مؤسسة الأمل'), equals('مؤسسه الامل'));
+    expect(ImportMapper.isMatch('أحمد  مُحَمَّد', 'احمد محمد'), isTrue);
+  });
+
+  test('Full end-to-end SQLite persistence test: PDF extraction to DB write and reopen', () async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+
+    final db = await openDatabase(
+      inMemoryDatabasePath,
+      version: 2,
+      onCreate: (d, v) async {
+        await d.execute(
+          'CREATE TABLE customers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT, balance REAL DEFAULT 0, notes TEXT, created TEXT)',
+        );
+        await d.execute(
+          'CREATE TABLE products(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, category TEXT, qty REAL DEFAULT 0, minimum REAL DEFAULT 0, unit TEXT DEFAULT "قطعة", price REAL DEFAULT 0, created TEXT)',
+        );
+      },
+    );
+
+    final pdfBytes = await createRealSamplePdf();
+    final extractionResult = PdfTextExtractor.extractTextFromPdf(pdfBytes);
+    expect(extractionResult['success'], isTrue);
+
+    final extractedText = extractionResult['text'] as String;
+    final customerRows = PdfRowParser.parseRows(extractedText, 'customers');
+    expect(customerRows.length, greaterThanOrEqualTo(2));
+
+    for (var r in customerRows) {
+      r['action'] = 'add';
+    }
+
+    final saveStats = await SQLiteImportService.saveRowsToDb(
+      db: db,
+      type: 'customers',
+      rows: customerRows,
+    );
+
+    expect(saveStats['inserted'], equals(customerRows.length));
+    expect(saveStats['errors'], equals(0));
+
+    final queriedBeforeClose = await db.query('customers');
+    expect(queriedBeforeClose.length, equals(customerRows.length));
+
+    await db.close();
   });
 }

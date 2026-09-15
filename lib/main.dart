@@ -194,11 +194,8 @@ class PdfRowParser {
         .toList();
 
     for (final line in lines) {
-      final parts = line
-          .split(RegExp(r'[,;\t]'))
-          .map((p) => p.trim())
-          .where((p) => p.isNotEmpty)
-          .toList();
+      List<String> parts = _tokenizeLine(line);
+
       if (parts.isEmpty) {
         continue;
       }
@@ -206,29 +203,104 @@ class PdfRowParser {
       final name = parts[0];
       if (name.isEmpty ||
           name.toLowerCase().contains('name') ||
-          name.contains('الاسم')) {
+          name.contains('الاسم') ||
+          name.contains('الصنف')) {
         continue;
       }
 
       if (type == 'customers') {
+        final balStr = parts.length > 2
+            ? parts[2].replaceAll(RegExp(r'[^\d.-]'), '')
+            : '0';
         list.add({
           'name': name,
           'phone': parts.length > 1 ? parts[1] : '',
-          'balance': double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
+          'balance': double.tryParse(balStr) ?? 0.0,
           'notes': parts.length > 3 ? parts[3] : '',
         });
       } else {
+        final qtyStr = parts.length > 2
+            ? parts[2].replaceAll(RegExp(r'[^\d.-]'), '')
+            : '0';
+        final minStr = parts.length > 3
+            ? parts[3].replaceAll(RegExp(r'[^\d.-]'), '')
+            : '5';
+        final priceStr = parts.length > 4
+            ? parts[4].replaceAll(RegExp(r'[^\d.-]'), '')
+            : '0';
+
         list.add({
           'name': name,
-          'category': parts.length > 1 ? parts[1] : 'عام',
-          'qty': double.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0.0,
-          'minimum': double.tryParse(parts.length > 3 ? parts[3] : '5') ?? 0.0,
-          'price': double.tryParse(parts.length > 4 ? parts[4] : '0') ?? 0.0,
-          'unit': parts.length > 5 ? parts[5] : 'قطعة',
+          'category':
+              parts.length > 1 && parts[1].isNotEmpty ? parts[1] : 'عام',
+          'qty': double.tryParse(qtyStr) ?? 0.0,
+          'minimum': double.tryParse(minStr) ?? 0.0,
+          'price': double.tryParse(priceStr) ?? 0.0,
+          'unit': parts.length > 5 && parts[5].isNotEmpty ? parts[5] : 'قطعة',
         });
       }
     }
     return list;
+  }
+
+  static List<String> _tokenizeLine(String line) {
+    if (line.contains(',') || line.contains(';') || line.contains('\t') || line.contains('|')) {
+      return line
+          .split(RegExp(r'[,;\t|]'))
+          .map((p) => p.trim())
+          .where((p) => p.isNotEmpty)
+          .toList();
+    }
+
+    final doubleSpaces = line
+        .split(RegExp(r'\s{2,}'))
+        .map((p) => p.trim())
+        .where((p) => p.isNotEmpty)
+        .toList();
+
+    if (doubleSpaces.length > 1) {
+      return doubleSpaces;
+    }
+
+    final tokens = <String>[];
+    final matchNums = RegExp(r'(-?\d+(?:\.\d+)?)');
+    final matches = matchNums.allMatches(line).toList();
+
+    if (matches.isNotEmpty) {
+      final firstMatchIndex = matches.first.start;
+      final textBefore = line.substring(0, firstMatchIndex).trim();
+      if (textBefore.isNotEmpty) {
+        tokens.add(textBefore);
+      }
+      for (final m in matches) {
+        tokens.add(m.group(0)!);
+      }
+      final lastMatchEnd = matches.last.end;
+      final textAfter = line.substring(lastMatchEnd).trim();
+      if (textAfter.isNotEmpty) {
+        tokens.add(textAfter);
+      }
+      return tokens;
+    }
+
+    return [line.trim()];
+  }
+}
+
+class ImportMapper {
+  static String normalizeName(String input) {
+    return input
+        .replaceAll(RegExp(r'[\u064B-\u0652]'), '')
+        .replaceAll(RegExp(r'[أإآا]'), 'ا')
+        .replaceAll('ة', 'ه')
+        .replaceAll('ى', 'ي')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .toLowerCase();
+  }
+
+  static bool isMatch(String name1, String name2) {
+    return normalizeName(name1) == normalizeName(name2);
   }
 }
 
@@ -242,103 +314,151 @@ class SQLiteImportService {
     int updatedCount = 0;
     int ignoredCount = 0;
     int errorCount = 0;
+    final List<String> errorLogs = [];
 
-    for (final row in rows) {
-      final act = row['action'];
-      if (act == 'ignore') {
-        ignoredCount++;
-        continue;
-      }
-
-      final String name = (row['name'] as String).trim();
-
-      try {
-        if (type == 'customers') {
-          if (act == 'add') {
-            await db.insert('customers', {
-              'name': name,
-              'phone': row['phone'],
-              'balance': row['balance'],
-              'notes': row['notes'],
-              'created': DateTime.now().toIso8601String(),
-            });
-            insertedCount++;
-          } else if (act == 'update') {
-            final affected = await db.update(
-              'customers',
-              {
-                'phone': row['phone'],
-                'balance': row['balance'],
-                'notes': row['notes'],
-              },
-              where: 'TRIM(name) = ?',
-              whereArgs: [name],
-            );
-            if (affected > 0) {
-              updatedCount++;
-            } else {
-              // Fallback insert if update matched 0 rows
-              await db.insert('customers', {
-                'name': name,
-                'phone': row['phone'],
-                'balance': row['balance'],
-                'notes': row['notes'],
-                'created': DateTime.now().toIso8601String(),
-              });
-              insertedCount++;
-            }
-          }
-        } else {
-          if (act == 'add') {
-            await db.insert('products', {
-              'name': name,
-              'category': row['category'],
-              'qty': row['qty'],
-              'minimum': row['minimum'],
-              'price': row['price'],
-              'unit': row['unit'],
-              'created': DateTime.now().toIso8601String(),
-            });
-            insertedCount++;
-          } else if (act == 'update') {
-            final affected = await db.update(
-              'products',
-              {
-                'category': row['category'],
-                'qty': row['qty'],
-                'minimum': row['minimum'],
-                'price': row['price'],
-                'unit': row['unit'],
-              },
-              where: 'TRIM(name) = ?',
-              whereArgs: [name],
-            );
-            if (affected > 0) {
-              updatedCount++;
-            } else {
-              await db.insert('products', {
-                'name': name,
-                'category': row['category'],
-                'qty': row['qty'],
-                'minimum': row['minimum'],
-                'price': row['price'],
-                'unit': row['unit'],
-                'created': DateTime.now().toIso8601String(),
-              });
-              insertedCount++;
-            }
-          }
+    await db.transaction((txn) async {
+      for (final row in rows) {
+        final act = row['action'];
+        if (act == 'ignore') {
+          ignoredCount++;
+          continue;
         }
-      } catch (e) {
-        errorCount++;
+
+        final String originalName = (row['name'] as String).trim();
+
+        try {
+          if (type == 'customers') {
+            if (act == 'add') {
+              await txn.insert('customers', {
+                'name': originalName,
+                'phone': row['phone'],
+                'balance': row['balance'],
+                'notes': row['notes'],
+                'created': DateTime.now().toIso8601String(),
+              });
+              insertedCount++;
+            } else if (act == 'update') {
+              final existingRows = await txn.query('customers');
+              int? targetId;
+              for (final ex in existingRows) {
+                final exName = (ex['name'] as String).trim();
+                if (ImportMapper.isMatch(exName, originalName)) {
+                  targetId = ex['id'] as int?;
+                  break;
+                }
+              }
+
+              if (targetId != null) {
+                final affected = await txn.update(
+                  'customers',
+                  {
+                    'phone': row['phone'],
+                    'balance': row['balance'],
+                    'notes': row['notes'],
+                  },
+                  where: 'id = ?',
+                  whereArgs: [targetId],
+                );
+                if (affected > 0) {
+                  updatedCount++;
+                } else {
+                  await txn.insert('customers', {
+                    'name': originalName,
+                    'phone': row['phone'],
+                    'balance': row['balance'],
+                    'notes': row['notes'],
+                    'created': DateTime.now().toIso8601String(),
+                  });
+                  insertedCount++;
+                }
+              } else {
+                await txn.insert('customers', {
+                  'name': originalName,
+                  'phone': row['phone'],
+                  'balance': row['balance'],
+                  'notes': row['notes'],
+                  'created': DateTime.now().toIso8601String(),
+                });
+                insertedCount++;
+              }
+            }
+          } else {
+            if (act == 'add') {
+              await txn.insert('products', {
+                'name': originalName,
+                'category': row['category'],
+                'qty': row['qty'],
+                'minimum': row['minimum'],
+                'price': row['price'],
+                'unit': row['unit'],
+                'created': DateTime.now().toIso8601String(),
+              });
+              insertedCount++;
+            } else if (act == 'update') {
+              final existingRows = await txn.query('products');
+              int? targetId;
+              for (final ex in existingRows) {
+                final exName = (ex['name'] as String).trim();
+                if (ImportMapper.isMatch(exName, originalName)) {
+                  targetId = ex['id'] as int?;
+                  break;
+                }
+              }
+
+              if (targetId != null) {
+                final affected = await txn.update(
+                  'products',
+                  {
+                    'category': row['category'],
+                    'qty': row['qty'],
+                    'minimum': row['minimum'],
+                    'price': row['price'],
+                    'unit': row['unit'],
+                  },
+                  where: 'id = ?',
+                  whereArgs: [targetId],
+                );
+                if (affected > 0) {
+                  updatedCount++;
+                } else {
+                  await txn.insert('products', {
+                    'name': originalName,
+                    'category': row['category'],
+                    'qty': row['qty'],
+                    'minimum': row['minimum'],
+                    'price': row['price'],
+                    'unit': row['unit'],
+                    'created': DateTime.now().toIso8601String(),
+                  });
+                  insertedCount++;
+                }
+              } else {
+                await txn.insert('products', {
+                  'name': originalName,
+                  'category': row['category'],
+                  'qty': row['qty'],
+                  'minimum': row['minimum'],
+                  'price': row['price'],
+                  'unit': row['unit'],
+                  'created': DateTime.now().toIso8601String(),
+                });
+                insertedCount++;
+              }
+            }
+          }
+        } catch (e) {
+          errorCount++;
+          errorLogs.add('Error inserting/updating "$originalName": $e');
+        }
       }
-    }
+    });
 
     return {
       'inserted': insertedCount,
       'updated': updatedCount,
       'ignored': ignoredCount,
       'errors': errorCount,
+      'logs': errorLogs,
     };
   }
 }
